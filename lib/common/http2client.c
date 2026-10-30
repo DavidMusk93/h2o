@@ -973,6 +973,14 @@ static void close_connection_now(struct st_h2o_http2client_conn_t *conn, const c
     free(conn);
 }
 
+void h2o_httpclient__h2_dispose_connection(h2o_httpclient__h2_conn_t *_conn)
+{
+    struct st_h2o_http2client_conn_t *conn = (void *)_conn;
+    assert(conn->super.num_streams == 0);
+    assert(kh_size(conn->streams) == 0);
+    close_connection_now(conn, h2o_httpclient_error_io);
+}
+
 static int close_connection_if_necessary(struct st_h2o_http2client_conn_t *conn)
 {
     if (conn->state == H2O_HTTP2CLIENT_CONN_STATE_HALF_CLOSED && conn->super.num_streams == 0)

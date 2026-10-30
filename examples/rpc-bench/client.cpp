@@ -806,6 +806,11 @@ private:
       h3_verifier_initialized_ = false;
     }
     if (socket_pool_initialized_) {
+      while (!h2o_linklist_is_empty(&connection_pool_.http2.conns)) {
+        auto *connection = H2O_STRUCT_FROM_MEMBER(
+            h2o_httpclient__h2_conn_t, link, connection_pool_.http2.conns.next);
+        h2o_httpclient__h2_dispose_connection(connection);
+      }
       h2o_socketpool_dispose(&socket_pool_);
       socket_pool_initialized_ = false;
     }
@@ -822,6 +827,7 @@ private:
       origin_pool_initialized_ = false;
     }
     if (loop_ != nullptr) {
+      h2o_evloop_run(loop_, 0);
       h2o_evloop_destroy(loop_);
       loop_ = nullptr;
     }

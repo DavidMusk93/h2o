@@ -54,6 +54,7 @@ void test_lib__common__cache_c(void);
 void test_lib__common__hostinfo_c(void);
 void test_lib__common__httpclient_c(void);
 void test_lib__common__http3client_c(void);
+void test_lib__common__http2client_c(void);
 void test_lib__common__multithread_c(void);
 void test_lib__common__serverutil_c(void);
 void test_lib__common__socket_c(void);

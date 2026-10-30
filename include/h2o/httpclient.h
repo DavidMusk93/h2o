@@ -408,6 +408,12 @@ extern const size_t h2o_httpclient__h1_size;
 
 void h2o_httpclient__h2_on_connect(h2o_httpclient_t *client, h2o_socket_t *sock, h2o_url_t *origin);
 uint32_t h2o_httpclient__h2_get_max_concurrent_streams(h2o_httpclient__h2_conn_t *conn);
+/**
+ * Synchronously disposes an idle HTTP/2 connection, including pending writes and timers.
+ * The caller must have completed or cancelled every stream before destroying its event loop.
+ * With the built-in event loop, drain pending socket disposal by running the loop before destroying it.
+ */
+void h2o_httpclient__h2_dispose_connection(h2o_httpclient__h2_conn_t *conn);
 extern const size_t h2o_httpclient__h2_size;
 
 void h2o_httpclient_set_conn_properties_of_socket(h2o_socket_t *sock, h2o_httpclient_conn_properties_t *properties);
