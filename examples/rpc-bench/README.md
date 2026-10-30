@@ -7,6 +7,10 @@ adapter. The branch also fixes HTTP/3 body rejection: a nonzero body callback
 return closes the response state before the receive error path can invoke that
 callback again. `t/00unit/lib/common/http3client.c` covers continuing bodies,
 rejection, EOS and I/O errors.
+It also adds an internal idle H2 connection disposal API. After all streams
+complete, the adapter disposes retained H2 connections before the socket pool,
+then drains pending socket disposal before destroying the loop.
+`t/00unit/lib/common/http2client.c` checks timers and pending writes.
 
 The client shares one event loop and connection pool across logical lanes.
 `--request-storage reuse` retains lane objects and body/response capacity,
