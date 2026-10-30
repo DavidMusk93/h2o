@@ -478,6 +478,8 @@ public:
     return true;
   }
 
+  int http3ReceiveBufferBytes() const { return h3_receive_buffer_bytes_; }
+
   BatchResult run(std::uint64_t operations, std::size_t concurrency,
                   const std::string &payload, std::uint64_t first_sequence = 0,
                   bool serialize_connections = false) {
@@ -687,6 +689,24 @@ private:
       *error = "failed to create H3 client UDP socket";
       return false;
     }
+    // Large concurrent responses overflow the kernel's small UDP default.
+    // Reserve receive capacity before QUIC starts; record the effective limit.
+    const int receive_buffer_bytes = 8 * 1024 * 1024;
+    socklen_t receive_buffer_length = sizeof(h3_receive_buffer_bytes_);
+    if (setsockopt(h2o_socket_get_fd(socket), SOL_SOCKET, SO_RCVBUF,
+                   &receive_buffer_bytes, sizeof(receive_buffer_bytes)) != 0 ||
+        getsockopt(h2o_socket_get_fd(socket), SOL_SOCKET, SO_RCVBUF,
+                   &h3_receive_buffer_bytes_, &receive_buffer_length) != 0) {
+      *error = "failed to configure H3 UDP receive buffer: " +
+               std::string(std::strerror(errno));
+      h2o_socket_close(socket);
+      return false;
+    }
+    if (h3_receive_buffer_bytes_ < receive_buffer_bytes) {
+      *error = "H3 UDP receive buffer was clamped below the requested capacity";
+      h2o_socket_close(socket);
+      return false;
+    }
     h2o_quic_init_context(&h3_context_.h3, loop_, socket, nullptr,
                           &h3_context_.quic, &h3_next_cid_, nullptr,
                           h2o_httpclient_http3_notify_connection_update, 1,
@@ -845,6 +865,7 @@ private:
   h2o_url_t origin_{};
   h2o_http3client_ctx_t h3_context_{};
   quicly_cid_plaintext_t h3_next_cid_{};
+  int h3_receive_buffer_bytes_ = 0;
   std::string url_;
   std::vector<std::unique_ptr<Request>> requests_;
   std::vector<Request *> idle_requests_;
@@ -973,6 +994,10 @@ int main(int argc, char **argv) {
                "\"h2o-native-shared-pool\",\"logical_concurrency\":"
             << config.concurrency
             << ",\"socket_pool_capacity\":" << config.socket_pool_capacity
+            << ",\"http3_receive_buffer_bytes\":"
+            << (config.protocol == Protocol::H3
+                    ? std::to_string(client.http3ReceiveBufferBytes())
+                    : "null")
             << ",\"allocation_counter\":\"glibc-malloc-family-call-count\","
                "\"wire_counter\":\"external-scoped-counter\","
                "\"main_elapsed_ms\":"
