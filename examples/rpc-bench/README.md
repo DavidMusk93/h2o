@@ -3,7 +3,10 @@
 This branch is based on H2O `534c5fd9f10d185bd9b87ac75ec05dcc0722369e`.
 It adds a standalone C++17/Linux client and TLS echo server using the existing
 libh2o HTTP/1.1, HTTP/2 and HTTP/3 APIs. The optimization is in the client
-adapter; the upstream library is unchanged.
+adapter. The branch also fixes HTTP/3 body rejection: a nonzero body callback
+return closes the response state before the receive error path can invoke that
+callback again. `t/00unit/lib/common/http3client.c` covers continuing bodies,
+rejection, EOS and I/O errors.
 
 The client shares one event loop and connection pool across logical lanes.
 `--request-storage reuse` retains lane objects and body/response capacity,
@@ -20,7 +23,7 @@ content type, sequence and complete payload. TLS verifies the CA and SAN.
 The allocation counter counts glibc allocation-family calls; it does not
 measure allocated bytes or justify comparisons to other allocators.
 
-Build the locked H2O tree with `WITH_LIBUV=OFF`, then:
+Build the locked H2O tree's `libh2o-evloop` target, then:
 
 ```sh
 make -C examples/rpc-bench H2O_BUILD=/absolute/path/to/h2o-build
@@ -47,3 +50,17 @@ Compare `fresh` and `reuse` in three interleaved rounds at identical settings;
 include both hosts' CPU/RSS-time and scoped wire counters. Local loopback
 numbers are not distributed RPC evidence. The example does not establish
 production cancellation, reconnection or weak-network behavior.
+
+To measure responses independently of requests, pass identical
+`--response-bytes 16384 --response-content entropy` options to both server and
+client. Sizes range from 1 through 65536 bytes. `periodic` is compressible;
+`entropy` uses a fixed xorshift32 fixture. The server mixes the request sequence
+into every response byte, and the client checks the complete result. The
+sequence prefix adds eight framing bytes. Omitting the option preserves echo.
+These synthetic bytes do not model SQL row encoding.
+
+An oversized or different response must terminate with a validation error,
+including H3 with both `--request-storage fresh` and `reuse`. For example, set
+the server response to 16384 bytes and the client expectation to 1 byte, using
+one operation, one lane and zero warmup. This branch fixes the duplicate
+completion observed in that bounded cross-host rejection case.

@@ -12,8 +12,8 @@ LDLIBS ?= -lssl -lcrypto -lz -lm -ldl -lpthread
 .PHONY: all
 all: $(OUT)/h2o-native-rpc-client $(OUT)/h2o-native-rpc-server
 
-$(OUT)/h2o-native-rpc-client: client.cpp alloc_counter.cpp benchmark.h
+$(OUT)/h2o-native-rpc-client: client.cpp alloc_counter.cpp benchmark.h response_contract.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) client.cpp alloc_counter.cpp $(H2O_BUILD)/libh2o-evloop.a $(LDFLAGS) $(LDLIBS) -o $@
 
-$(OUT)/h2o-native-rpc-server: server.cpp
+$(OUT)/h2o-native-rpc-server: server.cpp response_contract.h
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) server.cpp $(H2O_BUILD)/libh2o-evloop.a $(LDFLAGS) $(LDLIBS) -o $@

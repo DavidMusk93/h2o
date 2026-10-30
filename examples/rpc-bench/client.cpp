@@ -1,4 +1,5 @@
 #include "benchmark.h"
+#include "response_contract.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -47,6 +48,8 @@ struct ClientConfig {
   std::uint16_t port = 0;
   std::uint64_t operations = 0;
   std::size_t payload_bytes = 256;
+  std::size_t response_bytes = 0;
+  std::string response_content = "periodic";
   std::size_t concurrency = 1;
   std::size_t socket_pool_capacity = 1;
   std::uint64_t debug_operations = 10;
@@ -101,6 +104,7 @@ bool parseArgs(int argc, char **argv, ClientConfig *config,
     if (option == "--protocol" || option == "--host" ||
         option == "--tls-ca-file" || option == "--tls-server-name" ||
         option == "--warmup-mode" || option == "--request-storage" ||
+        option == "--response-content" ||
         option == "--ready-file" || option == "--start-file" ||
         option == "--measurement-stop-file") {
       if (++index >= argc || *argv[index] == '\0') {
@@ -108,6 +112,14 @@ bool parseArgs(int argc, char **argv, ClientConfig *config,
         return false;
       }
       const std::string value = argv[index];
+      if (option == "--response-content") {
+        if (value != "periodic" && value != "entropy") {
+          *error = "--response-content requires periodic or entropy";
+          return false;
+        }
+        config->response_content = value;
+        continue;
+      }
       if (option == "--protocol") {
         config->protocol_name = value;
         if (value == "h1") {
@@ -176,6 +188,12 @@ bool parseArgs(int argc, char **argv, ClientConfig *config,
       config->operations = value;
     } else if (option == "--payload-bytes") {
       config->payload_bytes = value;
+    } else if (option == "--response-bytes") {
+      if (value == 0 || value > 65536) {
+        *error = "--response-bytes requires 1..65536";
+        return false;
+      }
+      config->response_bytes = value;
     } else if (option == "--concurrency") {
       config->concurrency = value;
     } else if (option == "--socket-pool-capacity") {
@@ -188,6 +206,10 @@ bool parseArgs(int argc, char **argv, ClientConfig *config,
       *error = "unknown option: " + option;
       return false;
     }
+  }
+  if (config->response_bytes == 0 && config->response_content != "periodic") {
+    *error = "--response-content requires --response-bytes";
+    return false;
   }
   if (config->host.empty() || config->ca_file.empty() ||
       config->port == 0 || config->operations == 0 ||
@@ -258,10 +280,19 @@ std::string sha256(const std::string &value) {
   return output.str();
 }
 
-std::string resultDigest(std::uint64_t operations, const std::string &payload) {
-  return sha256("operations=" + std::to_string(operations) +
-                ";payload_bytes=" + std::to_string(payload.size()) +
-                ";payload_sha256=" + sha256(payload));
+std::string resultDigest(std::uint64_t operations, const std::string &payload,
+                          const ClientConfig &config) {
+  std::string contract = "operations=" + std::to_string(operations) +
+                         ";payload_bytes=" + std::to_string(payload.size()) +
+                         ";payload_sha256=" + sha256(payload);
+  if (config.response_bytes != 0) {
+    contract += ";response_contract=response-v1;response_bytes=" +
+                std::to_string(config.response_bytes) + ";response_content=" +
+                config.response_content + ";response_base_sha256=" +
+                sha256(responseBase(config.response_bytes,
+                                     config.response_content));
+  }
+  return sha256(contract);
 }
 
 double percentileMs(const std::vector<std::uint64_t> &sorted_ns,
@@ -331,7 +362,10 @@ int protocolVersion(Protocol protocol) {
 
 class H2oNativeClient {
 public:
-  explicit H2oNativeClient(const ClientConfig &config) : config_(config) {}
+  explicit H2oNativeClient(const ClientConfig &config)
+      : config_(config),
+        response_base_(responseBase(config.response_bytes,
+                                    config.response_content)) {}
 
   ~H2oNativeClient() { dispose(); }
 
@@ -490,11 +524,16 @@ private:
     h2o_mem_pool_t pool;
     h2o_url_t target{};
     std::string body;
+    std::string expected;
     std::string response;
     Clock::time_point started_at;
     bool status_valid = false;
     bool content_type_valid = false;
     bool awaiting_connection = false;
+
+    const std::string &expectedFrame() const {
+      return expected.empty() ? body : expected;
+    }
   };
 
   static h2o_httpclient_head_cb
@@ -567,7 +606,8 @@ private:
     auto *request = static_cast<Request *>(client->data);
     if (client->buf != nullptr && *client->buf != nullptr &&
         (*client->buf)->size != 0) {
-      if ((*client->buf)->size > request->body.size() - request->response.size()) {
+      if ((*client->buf)->size >
+          request->expectedFrame().size() - request->response.size()) {
         request->owner->finishRequest(request, "response exceeds expected frame");
         return -1;
       }
@@ -581,7 +621,7 @@ private:
       } else if (!request->content_type_valid) {
         request->owner->finishRequest(request,
                                       "response content-type mismatch");
-      } else if (request->response != request->body) {
+      } else if (request->response != request->expectedFrame()) {
         request->owner->finishRequest(request, "response frame mismatch");
       } else {
         request->owner->finishRequest(request, nullptr);
@@ -677,11 +717,20 @@ private:
                 sizeof(network_sequence));
     std::memcpy(request->body.data() + sizeof(network_sequence),
                 payload_->data(), payload_->size());
+    if (config_.response_bytes == 0) {
+      request->expected.clear();
+    } else {
+      request->expected.resize(sizeof(sequence) + config_.response_bytes);
+      std::memcpy(request->expected.data(), &network_sequence, sizeof(sequence));
+      std::memcpy(request->expected.data() + sizeof(sequence),
+                  response_base_.data(), response_base_.size());
+      mixResponseSequence(&request->expected, sequence, sizeof(sequence));
+    }
     if (config_.request_storage == "reuse") {
       // Origin strings live until client disposal; the URL is immutable.
       // Each request still owns its headers and H2O allocation pool.
       request->target = origin_;
-      request->response.reserve(request->body.size());
+      request->response.reserve(request->expectedFrame().size());
     } else {
       if (h2o_url_parse(&request->pool, url_.c_str(), url_.size(),
                         &request->target) != 0) {
@@ -779,6 +828,7 @@ private:
   }
 
   ClientConfig config_;
+  const std::string response_base_;
   h2o_loop_t *loop_ = nullptr;
   h2o_multithread_queue_t *queue_ = nullptr;
   h2o_multithread_receiver_t getaddr_receiver_{};
@@ -888,7 +938,7 @@ int main(int argc, char **argv) {
   std::cout << std::fixed << std::setprecision(6)
             << "{\"schema_version\":1,\"operations\":" << config.operations
             << ",\"errors\":" << errors << ",\"result_digest\":\""
-            << resultDigest(config.operations, payload)
+            << resultDigest(config.operations, payload, config)
             << "\",\"latency_ms\":{\"p50\":"
             << percentileMs(measured.latency_ns, 0.50)
             << ",\"p95\":" << percentileMs(measured.latency_ns, 0.95)
@@ -905,6 +955,8 @@ int main(int argc, char **argv) {
                                                           : config.server_name)
             << "\",\"warmup_seconds\":" << config.warmup_seconds
             << ",\"warmup_mode\":\"" << config.warmup_mode << "\""
+            << ",\"response_bytes\":" << config.response_bytes
+            << ",\"response_content\":\"" << config.response_content << "\""
             << ",\"warmup_connection_establishment\":\""
             << (config.protocol == Protocol::H2 &&
                         config.warmup_mode == "serial-seed"

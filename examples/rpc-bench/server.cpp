@@ -1,3 +1,5 @@
+#include "response_contract.h"
+
 #include <arpa/inet.h>
 #include <h2o.h>
 #include <h2o/http2.h>
@@ -27,9 +29,12 @@ struct ServerConfig {
   std::uint16_t port = 0;
   std::string certificate_file;
   std::string key_file;
+  std::size_t response_bytes = 0;
+  std::string response_content = "periodic";
 };
 
 std::atomic<bool> stop_requested{false};
+std::string response_base;
 
 void requestStop(int) { stop_requested.store(true, std::memory_order_release); }
 
@@ -74,12 +79,27 @@ bool parseArgs(int argc, char **argv, ServerConfig *config,
         return false;
       }
       config->port = static_cast<std::uint16_t>(value);
+    } else if (option == "--response-bytes") {
+      std::uint64_t value = 0;
+      if (!parseUnsigned(argv[index], &value) || value == 0 || value > 65536) {
+        *error = "--response-bytes requires 1..65536";
+        return false;
+      }
+      config->response_bytes = value;
+    } else if (option == "--response-content") {
+      config->response_content = argv[index];
+      if (config->response_content != "periodic" &&
+          config->response_content != "entropy") {
+        *error = "--response-content requires periodic or entropy";
+        return false;
+      }
     } else {
       *error = "unknown option: " + option;
       return false;
     }
   }
-  if (config->port == 0 || config->certificate_file.empty() ||
+  if ((config->response_bytes == 0 && config->response_content != "periodic") ||
+      config->port == 0 || config->certificate_file.empty() ||
       config->key_file.empty()) {
     *error = "port, TLS certificate, and TLS key are required";
     return false;
@@ -132,6 +152,10 @@ public:
   ~H2oNativeServer() { dispose(); }
 
   bool initialize(const ServerConfig &options, std::string *error) {
+    if (options.response_bytes != 0) {
+      response_base = flowkit::auto_bench::rpc::responseBase(
+          options.response_bytes, options.response_content);
+    }
     h2o_config_init(&config_);
     configured_ = true;
     config_.http2.idle_timeout = 120'000;
@@ -192,11 +216,25 @@ private:
     }
     request->res.status = 200;
     request->res.reason = "OK";
-    request->res.content_length = request->entity.len;
+    std::string response;
+    if (!response_base.empty()) {
+      std::uint64_t sequence = 0;
+      for (std::size_t index = 0; index < sizeof(sequence); ++index) {
+        sequence = (sequence << 8) |
+                   static_cast<unsigned char>(request->entity.base[index]);
+      }
+      response.assign(request->entity.base, sizeof(sequence));
+      response += response_base;
+      flowkit::auto_bench::rpc::mixResponseSequence(&response, sequence,
+                                                   sizeof(sequence));
+    }
+    const char *body = response.empty() ? request->entity.base : response.data();
+    const std::size_t size = response.empty() ? request->entity.len : response.size();
+    request->res.content_length = size;
     h2o_add_header(&request->pool, &request->res.headers,
                    H2O_TOKEN_CONTENT_TYPE, nullptr,
                    H2O_STRLIT("application/octet-stream"));
-    h2o_send_inline(request, request->entity.base, request->entity.len);
+    h2o_send_inline(request, body, size);
     return 0;
   }
 
@@ -452,6 +490,8 @@ int main(int argc, char **argv) {
   stop_requested.store(false, std::memory_order_release);
   std::signal(SIGINT, requestStop);
   std::signal(SIGTERM, requestStop);
+  // A client can reject a response and close while TLS still has bytes to send.
+  std::signal(SIGPIPE, SIG_IGN);
 
   H2oNativeServer server;
   if (!server.initialize(config, &error)) {
