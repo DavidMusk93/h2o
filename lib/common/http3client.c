@@ -429,7 +429,8 @@ static int call_on_body(struct st_h2o_http3client_req_t *req, const char *errstr
     assert(req->response_state == H2O_HTTP3CLIENT_RESPONSE_STATE_BODY);
 
     int ret = req->super._cb.on_body(&req->super, errstr, NULL, 0);
-    if (errstr != NULL)
+    /* A rejected body is terminal; on_receive must not notify the callback again. */
+    if (errstr != NULL || ret != 0)
         req->response_state = H2O_HTTP3CLIENT_RESPONSE_STATE_CLOSED;
 
     return ret;
